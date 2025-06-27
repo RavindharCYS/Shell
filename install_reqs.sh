@@ -33,24 +33,10 @@ print_warning() {
 install_apt_packages() {
     print_status "Installing core tools from APT repository..."
     
-    # List of packages to install via apt
     local apt_packages=(
-        dnsutils      # for dig, host
-        jq
-        nmap
-        whois
-        curl
-        whatweb
-        nikto
-        gobuster
-        wafw00f
-        sslscan
-        cutycapt
-        theharvester
-        seclists      # for wordlists
-        golang-go
-        nodejs
-        npm
+        dnsutils jq nmap whois curl whatweb nikto gobuster
+        wafw00f sslscan cutycapt theharvester seclists
+        golang-go nodejs npm
     )
 
     apt-get update
@@ -66,7 +52,6 @@ install_apt_packages() {
 install_go_tools() {
     print_status "Installing Go-based tools (Subfinder, Amass)..."
     
-    # This ensures tools are installed for the user who ran `sudo`, not for root.
     local run_user=${SUDO_USER:-$(whoami)}
     local go_path
     go_path=$(su -l "$run_user" -c 'go env GOPATH')
@@ -79,7 +64,6 @@ install_go_tools() {
     print_status "Go path is: $go_path"
     local go_bin_path="$go_path/bin"
 
-    # List of Go-based tools
     local go_tools=(
         "github.com/projectdiscovery/subfinder/v2/cmd/subfinder"
         "github.com/owasp-amass/amass/v4/cmd/amass"
@@ -87,11 +71,9 @@ install_go_tools() {
 
     for tool in "${go_tools[@]}"; do
         print_status "Installing $tool..."
-        su -l "$run_user" -c "go install -v $tool@latest"
+        su -l "$run_user" -c "GOPATH=$go_path go install -v $tool@latest"
     done
 
-    # --- Ensure Go binaries are in the PATH ---
-    # This is a more robust way to add the path to the user's profile.
     local bash_profile="/home/$run_user/.bashrc"
     local zsh_profile="/home/$run_user/.zshrc"
     local path_export_line="export PATH=\$PATH:$go_bin_path"
@@ -109,11 +91,7 @@ install_go_tools() {
 install_node_tools() {
     print_status "Installing Node.js-based tools (Wappalyzer CLI)..."
     
-    # List of global npm packages
-    local npm_packages=(
-        "wappalyzer-cli"
-    )
-
+    local npm_packages=("wappalyzer-cli")
     npm install -g "${npm_packages[@]}"
     
     if [ $? -ne 0 ]; then
@@ -121,25 +99,47 @@ install_node_tools() {
         exit 1
     fi
     print_success "Node.js tools installed successfully."
+
+    # --- [NEW] Add npm global bin path to user's profile ---
+    print_status "Ensuring Node.js global binaries are in the PATH..."
+    local run_user=${SUDO_USER:-$(whoami)}
+    
+    # Get the global install prefix for npm as the correct user
+    local npm_prefix
+    npm_prefix=$(npm config get prefix) # Using sudo, this gets the global system path
+    if [ -z "$npm_prefix" ]; then
+        print_warning "Could not determine npm global prefix. Manual PATH configuration may be needed."
+        return
+    fi
+    
+    local npm_bin_path="$npm_prefix/bin"
+    
+    local bash_profile="/home/$run_user/.bashrc"
+    local zsh_profile="/home/$run_user/.zshrc"
+    local path_export_line="export PATH=\$PATH:$npm_bin_path"
+
+    for profile in "$bash_profile" "$zsh_profile"; do
+        if [ -f "$profile" ] && ! grep -q "PATH.*$npm_bin_path" "$profile"; then
+            print_status "Adding Node.js bin path to $profile"
+            echo -e "\n# Node.js global binaries path\n$path_export_line" >> "$profile"
+        fi
+    done
 }
 
 verify_installation() {
     print_status "Verifying installations..."
     
     local all_tools=(
-        # APT
         "dig" "host" "jq" "nmap" "whois" "curl" "whatweb" "nikto" "gobuster" "wafw00f" "sslscan" "cutycapt" "theHarvester"
-        # Go (needs to be checked as the user)
-        "subfinder" "amass"
-        # Node
-        "wappalyzer"
+        "subfinder" "amass" "wappalyzer"
     )
     
     local missing_count=0
     local run_user=${SUDO_USER:-$(whoami)}
 
     for tool in "${all_tools[@]}"; do
-        if ! su -l "$run_user" -c "command -v $tool" &>/dev/null; then
+        # We check as the user who ran sudo, sourcing their profile to catch the new PATHs
+        if ! su -l "$run_user" -c "source ~/.bashrc &>/dev/null; source ~/.zshrc &>/dev/null; command -v $tool" &>/dev/null; then
             print_error "$tool not found in PATH."
             missing_count=$((missing_count + 1))
         fi
@@ -147,7 +147,7 @@ verify_installation() {
 
     if [ "$missing_count" -gt 0 ]; then
         print_error "$missing_count tools seem to be missing or not in the PATH."
-        print_warning "Try running 'source ~/.bashrc' (or ~/.zshrc) in a new terminal."
+        print_warning "Try running 'source ~/.bashrc' (or ~/.zshrc) in a new terminal before retrying."
         return 1
     fi
 
@@ -157,7 +157,6 @@ verify_installation() {
 
 # --- Main Execution ---
 
-# Check for root privileges
 if [[ $EUID -ne 0 ]]; then
    print_error "This script must be run as root. Please use 'sudo ./install_reqs.sh'." 
    exit 1
