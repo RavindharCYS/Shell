@@ -1,35 +1,49 @@
-# requirements.txt
-# A list of dependencies for the external_recon.sh script.
-# Use the install_reqs.sh script for automated installation on Kali Linux.
+# ===============================================
+# Requirements for external-cli.sh
+# ===============================================
+#
+# This file lists all dependencies required to run the main script.
+# For automated installation on Debian-based systems (like Kali Linux),
+# please run the 'install_reqs.sh' script as root.
+#
+# Format: package_name # Purpose
+#
 
-# --- APT Packages (Can be installed with 'apt-get install') ---
+# --- System Packages (Install via APT on Debian/Ubuntu/Kali) ---
 
-# Core Utilities
-dnsutils        # For 'dig' and 'host' commands (reverse IP lookup, DNS checks)
-jq              # For parsing JSON output from crt.sh
-nmap            # For port scanning and service detection
-whois           # For domain ownership lookups
-curl            # For making web requests (crt.sh, checking hosts)
+# Core Runtimes & Prerequisites
+golang-go      # Required to build and install Go-based tools
+nodejs         # JavaScript runtime for Node.js tools
+npm            # Node Package Manager, for installing wappalyzer-cli
+seclists       # Provides wordlists used by tools like Gobuster (`/usr/share/wordlists/dirb/common.txt`)
 
-# Web Scanning & Enumeration
-whatweb         # For web technology detection
-nikto           # For web vulnerability scanning
-gobuster        # For directory and file bruteforcing
-wafw00f         # For Web Application Firewall (WAF) detection
-sslscan         # For checking SSL/TLS configurations
-cutycapt        # For taking screenshots of web pages
+# Core Command-Line Tools
+dnsutils       # Provides 'dig' and 'host' for DNS queries and lookups
+jq             # Command-line JSON processor (used for crt.sh results)
+nmap           # The primary tool for port scanning and service detection
+whois          # For retrieving WHOIS information for domains
+curl           # For making web requests to APIs and services
 
-# Information Gathering
-theharvester    # For email and domain information harvesting
+# Web Enumeration & Scanning Tools
+whatweb        # Identifies technologies used on websites
+nikto          # Web server vulnerability scanner (lightweight scan)
+gobuster       # Directory, file, and DNS bruteforcing tool
+wafw00f        # Web Application Firewall (WAF) detection tool
+sslscan        # Scans SSL/TLS ciphers and configurations
+cutycapt       # Utility to capture screenshots of web pages from the CLI
 
-# Wordlists (Required by Gobuster)
-seclists        # Comprehensive wordlists, includes dirb/common.txt
+# Information Gathering Tools
+theharvester   # Gathers emails, subdomains, hosts, etc., from public sources
 
-# --- Golang-based Tools (Requires Go to be installed) ---
-# The install script will handle installing Go first.
-subfinder       # For fast passive subdomain enumeration
-amass           # For in-depth subdomain enumeration
 
-# --- Node.js-based Tools (Requires Node.js/NPM to be installed) ---
-# The install script will handle installing Node.js first.
-wappalyzer-cli  # For identifying technologies on websites
+# --- Go-based Tools (Installed via 'go install') ---
+
+# The install script handles installing Go first.
+subfinder      # Fast passive subdomain discovery tool
+amass          # In-depth attack surface mapping and asset discovery
+
+
+# --- Node.js-based Tools (Installed via 'npm install -g') ---
+
+# The install script handles installing Node.js/NPM first.
+wappalyzer-cli # Identifies web technologies from the command line
