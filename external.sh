@@ -56,22 +56,20 @@ create_checkpoint() {
 }
 
 # Dependency Check
+### MODIFICATION ###: This function now only warns instead of exiting.
 check_dependencies() {
     log "[+] Checking for required tools..."
     local missing_tools=0
-    # Add all CLI tools used in the script to this list
     local tools=("nmap" "host" "subfinder" "amass" "jq" "dig" "whatweb" "nikto" "gobuster" "cutycapt" "wafw00f" "theHarvester" "wappalyzer" "sslscan" "whois" "tee" "tar")
     for tool in "${tools[@]}"; do
         if ! command -v "$tool" &> /dev/null; then
-            log "[-] Error: Required tool '$tool' is not installed."
+            log "[!] Warning: Required tool '$tool' is not installed. Steps depending on it will be skipped."
             missing_tools=1
         fi
     done
-    if [[ $missing_tools -eq 1 ]]; then
-        log "[-] Please install the missing tools and try again."
-        exit 1
+    if [[ $missing_tools -eq 0 ]]; then
+        log "[✓] All dependencies appear to be satisfied."
     fi
-    log "[✓] All dependencies are satisfied."
 }
 
 # --- Core Logic Functions ---
@@ -82,15 +80,12 @@ setup() {
     mkdir -p "$OUTPUT_DIR"
     cd "$OUTPUT_DIR" || { log "[-] Failed to create/access directory"; exit 1; }
 
-    # Initialize log file
     LOG_FILE="recon_log_$(date +%Y%m%d_%H%M%S).log"
-    # Redirect stdout/stderr to a log file and the console
     exec > >(tee -a "$LOG_FILE") 2>&1
 
     log "[+] Starting External Recon and Scanning at $(date)"
     log "[+] This script includes delays to minimize impact on production systems"
     
-    # Copy and initialize files
     cp "$INPUT_FILE" ./ip.txt
     touch domains.txt subdomains.txt excluded_hosts.txt
     
@@ -105,8 +100,11 @@ setup() {
 
 # Step 2: Reverse IP Lookup
 reverse_ip_lookup() {
+    ### MODIFICATION ###
+    if ! command -v host &>/dev/null; then log "[!] Warning: 'host' not found. Skipping reverse IP lookup."; return; fi
     create_checkpoint "rev_ip"
     log "[+] Performing Reverse IP Lookup..."
+    # ... rest of the function is unchanged
     while read -r ip; do
         log "[*] Processing IP: $ip"
         if grep -qFx "$ip" excluded_hosts.txt 2>/dev/null; then
@@ -129,24 +127,41 @@ subdomain_enumeration() {
     mkdir -p subdomain_results
     while read -r domain; do
         log "[*] Enumerating subdomains for: $domain"
-        subfinder -d "$domain" -silent -o "subdomain_results/subfinder_$domain.txt"
-        amass enum -passive -d "$domain" -timeout "$TIMEOUT" -o "subdomain_results/amass_$domain.txt"
-        curl -s "https://crt.sh/?q=%25.$domain&output=json" | jq -r '.[].name_value' | sort -u >> "subdomain_results/crtsh_$domain.txt"
+        ### MODIFICATION ###: Check for each tool individually.
+        if command -v subfinder &>/dev/null; then
+            subfinder -d "$domain" -silent -o "subdomain_results/subfinder_$domain.txt"
+        else
+            log "[!] Warning: 'subfinder' not found, skipping it."
+        fi
+        if command -v amass &>/dev/null; then
+            amass enum -passive -d "$domain" -timeout "$TIMEOUT" -o "subdomain_results/amass_$domain.txt"
+        else
+            log "[!] Warning: 'amass' not found, skipping it."
+        fi
+        if command -v curl &>/dev/null && command -v jq &>/dev/null; then
+            curl -s "https://crt.sh/?q=%25.$domain&output=json" | jq -r '.[].name_value' | sort -u >> "subdomain_results/crtsh_$domain.txt"
+        else
+            log "[!] Warning: 'curl' or 'jq' not found, skipping crt.sh check."
+        fi
         monitor_resources
         sleep $((DEFAULT_SCAN_DELAY * 2))
     done < domains.txt
 
-    cat subdomain_results/*.txt | sort -u > Subdomains_tmp.txt
+    cat subdomain_results/*.txt 2>/dev/null | sort -u > Subdomains_tmp.txt
     log "[+] Filtering out potential wildcard domains..."
     grep -v "^\*\." Subdomains_tmp.txt > Subdomains.txt
     rm Subdomains_tmp.txt
     log "[✓] Subdomain enumeration completed: $(wc -l < Subdomains.txt) subdomains found"
 }
 
+
 # Step 4: Subdomain IP Resolution
 resolve_subdomain_ips() {
+    ### MODIFICATION ###
+    if ! command -v dig &>/dev/null; then log "[!] Warning: 'dig' not found. Skipping subdomain IP resolution."; return; fi
     create_checkpoint "resolve"
     log "[+] Resolving Subdomain IPs (parallel processing)..."
+    # ... rest of the function is unchanged
     log "[*] Resolving $(wc -l < Subdomains.txt) subdomains..."
     
     pids=()
@@ -165,21 +180,26 @@ resolve_subdomain_ips() {
     done < Subdomains.txt
     wait
     
-    sort -u subdomain_ip_mapping.tmp -o subdomain_ip_mapping.txt
-    cut -d, -f2 subdomain_ip_mapping.txt | sort -u > Subdomain_IPs.txt
-    rm subdomain_ip_mapping.tmp
-    log "[✓] Subdomain IP resolution completed: $(wc -l < Subdomain_IPs.txt) IPs found"
+    sort -u subdomain_ip_mapping.tmp -o subdomain_ip_mapping.txt 2>/dev/null || true
+    if [[ -f subdomain_ip_mapping.txt ]]; then
+      cut -d, -f2 subdomain_ip_mapping.txt | sort -u > Subdomain_IPs.txt
+    fi
+    rm subdomain_ip_mapping.tmp 2>/dev/null || true
+    log "[✓] Subdomain IP resolution completed: $(wc -l < Subdomain_IPs.txt 2>/dev/null) IPs found"
 }
 
 # Step 5: Port Scanning
 port_scanning() {
+    ### MODIFICATION ###
+    if ! command -v nmap &>/dev/null; then log "[!] Warning: 'nmap' not found. Skipping all port scanning."; return; fi
     create_checkpoint "portscan"
     log "[+] Running Nmap Port Scans (reduced intensity)..."
+    # ... rest of the function is unchanged
     log "[*] Running top 1000 ports scan first..."
     nmap -sS -Pn --top-ports 1000 -T"$NMAP_TIMING" --max-retries 2 -iL ip.txt -oA nmap/main_ip_top_ports
     nmap -sS -Pn --top-ports 1000 -T"$NMAP_TIMING" --max-retries 2 -iL Subdomain_IPs.txt -oA nmap/subdomain_top_ports
     
-    grep "open" nmap/*.gnmap | cut -d' ' -f2 | sort -u > hosts_with_open_ports.txt
+    grep "open" nmap/*.gnmap 2>/dev/null | cut -d' ' -f2 | sort -u > hosts_with_open_ports.txt
     
     log "[*] Running full port scan ONLY on hosts with open ports..."
     if [[ -s hosts_with_open_ports.txt ]]; then
@@ -190,8 +210,11 @@ port_scanning() {
 
 # Step 6: Service & Version Detection
 service_detection() {
+    ### MODIFICATION ###
+    if ! command -v nmap &>/dev/null; then log "[!] Warning: 'nmap' not found. Skipping service detection."; return; fi
     create_checkpoint "servicedetect"
     log "[+] Performing Service & Version Detection..."
+    # ... rest of the function is unchanged
     if [[ -f nmap/all_hosts_fullscan.gnmap ]]; then
         open_ports=$(grep -h "open" nmap/all_hosts_fullscan.gnmap | cut -d' ' -f4- | tr -d ' ' | sed 's|/open/[a-zA-Z-]*||g' | tr ',' '\n' | sort -un | tr '\n' ',' | sed 's/,$//')
         if [[ -n "$open_ports" ]]; then
@@ -204,9 +227,12 @@ service_detection() {
 
 # Step 7: Web Technology Detection (WhatWeb)
 web_stack_detection() {
+    ### MODIFICATION ###
+    if ! command -v whatweb &>/dev/null; then log "[!] Warning: 'whatweb' not found. Skipping WhatWeb technology detection."; return; fi
     create_checkpoint "webtech"
     log "[+] Running Web Technology Detection..."
-    grep -h "open" nmap/*.gnmap | grep -E "http|web|ssl" | cut -d' ' -f2 | sort -u > potential_web_hosts.txt
+    # ... rest of the function is unchanged
+    grep -h "open" nmap/*.gnmap 2>/dev/null | grep -E "http|web|ssl" | cut -d' ' -f2 | sort -u > potential_web_hosts.txt
     > web_servers.txt
     while read -r host; do
         echo "http://$host" >> web_servers.txt
@@ -215,14 +241,19 @@ web_stack_detection() {
 
     log "[*] Running WhatWeb on $(wc -l < web_servers.txt) potential URLs..."
     whatweb --no-errors --max-threads 5 --wait 5 -i web_servers.txt -a 3 --log-json=web_detection/whatweb_results.json
-    jq -r '.[] | .target' web_detection/whatweb_results.json > confirmed_web_servers.txt
+    if [[ -f web_detection/whatweb_results.json ]]; then
+      jq -r '.[] | .target' web_detection/whatweb_results.json > confirmed_web_servers.txt
+    fi
     log "[✓] Web technology detection completed"
 }
 
 # Step 8: Safe Web Vulnerability Scanning (Nikto)
 web_vulnerability_scan() {
+    ### MODIFICATION ###
+    if ! command -v nikto &>/dev/null; then log "[!] Warning: 'nikto' not found. Skipping web vulnerability scan."; return; fi
     create_checkpoint "webvuln"
     log "[+] Running Lightweight Web Vulnerability Scan..."
+    # ... rest of the function is unchanged
     if [[ ! -s confirmed_web_servers.txt ]]; then
         log "[!] No confirmed web servers found. Skipping Nikto scan."
         return
@@ -240,9 +271,12 @@ web_vulnerability_scan() {
 
 # Step 9: Selective Vulnerability Detection (Nmap Scripts)
 vulnerability_detection() {
+    ### MODIFICATION ###
+    if ! command -v nmap &>/dev/null; then log "[!] Warning: 'nmap' not found. Skipping Nmap vulnerability detection."; return; fi
     create_checkpoint "vulndetect"
     log "[+] Running Targeted Vulnerability Scans with Nmap NSE..."
-    grep -h "open" nmap/*.gnmap | cut -d' ' -f2 | sort -u > nmap_targets.txt
+    # ... rest of the function is unchanged
+    grep -h "open" nmap/*.gnmap 2>/dev/null | cut -d' ' -f2 | sort -u > nmap_targets.txt
     if [[ ! -s nmap_targets.txt ]]; then
         log "[!] No targets for Nmap scripting. Skipping."
         return
@@ -254,8 +288,11 @@ vulnerability_detection() {
 
 # Step 10: Directory Bruteforcing (gobuster)
 directory_bruteforcing() {
+    ### MODIFICATION ###
+    if ! command -v gobuster &>/dev/null; then log "[!] Warning: 'gobuster' not found. Skipping directory bruteforcing."; return; fi
     create_checkpoint "dirb"
     log "[+] Performing Directory Bruteforcing..."
+    # ... rest of the function is unchanged
     if [[ ! -s confirmed_web_servers.txt ]]; then
         log "[!] No confirmed web servers. Skipping dirb."
         return
@@ -275,8 +312,11 @@ directory_bruteforcing() {
 
 # Step 11: Screenshot Web Pages
 take_screenshots() {
+    ### MODIFICATION ###
+    if ! command -v cutycapt &>/dev/null; then log "[!] Warning: 'cutycapt' not found. Skipping screenshots."; return; fi
     create_checkpoint "screenshots"
     log "[+] Taking Screenshots of Web Pages..."
+    # ... rest of the function is unchanged
     if [[ ! -s confirmed_web_servers.txt ]]; then
         log "[!] No confirmed web servers. Skipping screenshots."
         return
@@ -292,8 +332,11 @@ take_screenshots() {
 
 # Step 12: Check for Common Security Misconfigurations
 check_misconfigs() {
+    ### MODIFICATION ###
+    if ! command -v curl &>/dev/null; then log "[!] Warning: 'curl' not found. Skipping misconfiguration checks."; return; fi
     create_checkpoint "misconfigs"
     log "[+] Checking for Common Security Misconfigurations..."
+    # ... rest of the function is unchanged
     if [[ ! -s confirmed_web_servers.txt ]]; then
         log "[!] No confirmed web servers. Skipping misconfig checks."
         return
@@ -315,8 +358,11 @@ check_misconfigs() {
 
 # Step 13: WAF Detection
 detect_waf() {
+    ### MODIFICATION ###
+    if ! command -v wafw00f &>/dev/null; then log "[!] Warning: 'wafw00f' not found. Skipping WAF detection."; return; fi
     create_checkpoint "waf"
     log "[+] Detecting Web Application Firewalls..."
+    # ... rest of the function is unchanged
     if [[ ! -s Subdomains.txt ]]; then log "[!] No subdomains to check for WAF."; return; fi
     wafw00f -i Subdomains.txt -o waf_detection/waf_report.txt 2>/dev/null
     log "[✓] WAF detection completed."
@@ -324,8 +370,11 @@ detect_waf() {
 
 # Step 14: DNS Zone Transfer Attempt
 zone_transfer() {
+    ### MODIFICATION ###
+    if ! command -v dig &>/dev/null; then log "[!] Warning: 'dig' not found. Skipping zone transfer attempts."; return; fi
     create_checkpoint "zonetransfer"
     log "[+] Attempting DNS Zone Transfers..."
+    # ... rest of the function is unchanged
     while read -r domain; do
         log "[*] Checking zone transfer for $domain"
         for ns in $(dig +short NS "$domain"); do
@@ -338,8 +387,11 @@ zone_transfer() {
 
 # Step 15: Email Harvesting
 harvest_emails() {
+    ### MODIFICATION ###
+    if ! command -v theHarvester &>/dev/null; then log "[!] Warning: 'theHarvester' not found. Skipping email harvesting."; return; fi
     create_checkpoint "emails"
     log "[+] Harvesting Email Addresses..."
+    # ... rest of the function is unchanged
     while read -r domain; do
         log "[*] Searching for emails related to $domain"
         theHarvester -d "$domain" -b google,bing -f "email_harvest/$domain.html"
@@ -350,6 +402,11 @@ harvest_emails() {
 
 # Step 16: Technologies Identification (Wappalyzer)
 detect_technologies() {
+    ### MODIFICATION ###: This directly addresses your request.
+    if ! command -v wappalyzer &>/dev/null; then
+        log "[!] Warning: 'wappalyzer' not found. Skipping technology detection with Wappalyzer."
+        return
+    fi
     create_checkpoint "techdetect"
     log "[+] Identifying Technologies with Wappalyzer CLI..."
     if [[ ! -s confirmed_web_servers.txt ]]; then log "[!] No web servers for tech detection."; return; fi
@@ -366,6 +423,7 @@ detect_technologies() {
 generate_report() {
     create_checkpoint "report"
     log "[+] Generating HTML Report..."
+    # This function is unchanged as it only uses built-in commands
     report_date=$(date +"%Y-%m-%d")
     cat > report.html <<-EOF
 <!DOCTYPE html>
@@ -380,12 +438,12 @@ pre { background-color: #eee; padding: 10px; border-radius: 5px; white-space: pr
 <h1>External Reconnaissance Report</h1>
 <div class="section summary"><h2>Summary</h2>
 <p><strong>Date:</strong> $report_date</p>
-<p><strong>Domains:</strong> $(wc -l < domains.txt)</p>
-<p><strong>Subdomains:</strong> $(wc -l < Subdomains.txt)</p>
-<p><strong>Web Servers:</strong> $(wc -l < confirmed_web_servers.txt)</p>
+<p><strong>Domains:</strong> $(wc -l < domains.txt 2>/dev/null || echo 0)</p>
+<p><strong>Subdomains:</strong> $(wc -l < Subdomains.txt 2>/dev/null || echo 0)</p>
+<p><strong>Web Servers:</strong> $(wc -l < confirmed_web_servers.txt 2>/dev/null || echo 0)</p>
 </div>
-<div class="section"><h2>Domains</h2><pre>$(cat domains.txt)</pre></div>
-<div class="section"><h2>Subdomains</h2><pre>$(head -50 Subdomains.txt)</pre></div>
+<div class="section"><h2>Domains</h2><pre>$(cat domains.txt 2>/dev/null || echo "No domains found.")</pre></div>
+<div class="section"><h2>Subdomains</h2><pre>$(head -50 Subdomains.txt 2>/dev/null || echo "No subdomains found.")</pre></div>
 <div class="section"><h2>Open Ports & Services (Sample)</h2><pre>$(head -50 nmap/services_os_scan.nmap 2>/dev/null || echo "No service scan results.")</pre></div>
 <div class="section"><h2>Potential Security Issues</h2><pre>$(cat security_checks/exposed_git.txt 2>/dev/null || echo "None found.")
 $(cat security_checks/exposed_config.txt 2>/dev/null || echo "None found.")</pre></div>
@@ -398,6 +456,7 @@ EOF
 create_archive() {
     create_checkpoint "archive"
     log "[+] Creating Results Archive..."
+    # This function is unchanged
     archive_name="../${OUTPUT_DIR##*/}_report_$(date +%Y%m%d).tar.gz"
     tar -czf "$archive_name" ./* --exclude='*.log'
     log "[✓] Archive created: $archive_name"
