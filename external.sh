@@ -1,4 +1,5 @@
 #!/bin/bash
+set -eo pipefail
 
 # === Configuration ===
 # Default delays between operations to reduce production impact
@@ -6,572 +7,512 @@ DEFAULT_SCAN_DELAY=2  # seconds between host scans
 NMAP_TIMING=3         # Reduced from T4 to T3 for production
 MAX_PARALLEL_SCANS=5  # Limit concurrent operations
 TIMEOUT=300           # Default timeout for operations
+WORDLIST="/usr/share/wordlists/dirb/common.txt" # Default wordlist for gobuster
 
-# === Setup and Initialization ===
-echo "[+] External Reconnaissance Tool for Production Environments"
-echo "[+] Enter directory name for storing results:"
-read result_dir
+# === All Steps Definition ===
+ALL_STEPS=("deps" "setup" "rev_ip" "subdomains" "resolve" "portscan" "servicedetect" "webtech" "webvuln" "vulndetect" "dirb" "screenshots" "misconfigs" "waf" "zonetransfer" "emails" "techdetect" "report" "archive" "cleanup")
 
-# Create directory to store outputs
-mkdir -p "$result_dir"
-cd "$result_dir" || { echo "[-] Failed to create/access directory"; exit 1; }
+# === Functions ===
 
-# Initialize log file
-LOG_FILE="recon_log_$(date +%Y%m%d_%H%M%S).log"
-exec > >(tee -a "$LOG_FILE") 2>&1
-
-echo "[+] Starting External Recon and Scanning at $(date)"
-echo "[+] This script includes delays to minimize impact on production systems"
-
-# === Input Validation ===
-if [[ ! -f ../ip.txt ]]; then
-    echo "[-] Error: ip.txt file not found in parent directory"
+usage() {
+    echo "Usage: $0 -i <input_file> -o <output_dir> [OPTIONS]"
+    echo
+    echo "External Reconnaissance Tool for Production Environments."
+    echo
+    echo "Required:"
+    echo "  -i, --input-file <file>    File with IPs or domains (one per line)."
+    echo "  -o, --output-dir <dir>     Directory to store results."
+    echo
+    echo "Options:"
+    echo "  -x, --exclude-file <file>  File with hosts to exclude from aggressive scans."
+    echo "  -s, --skip-steps <steps>   Comma-separated list of steps to skip."
+    echo "                             Available steps: ${ALL_STEPS[*]}"
+    echo "  --resume                   Resume from the last completed checkpoint."
+    echo "  --nmap-timing <0-5>        Set Nmap timing template (default: $NMAP_TIMING)."
+    echo "  -t, --threads <num>        Set max parallel processes (default: $MAX_PARALLEL_SCANS)."
+    echo "  --delay <secs>             Set default delay between scans (default: $DEFAULT_SCAN_DELAY)."
+    echo "  -w, --wordlist <file>      Wordlist for directory bruteforcing (default: $WORDLIST)."
+    echo "  -h, --help                 Display this help message."
     exit 1
-fi
+}
 
-# Copy and initialize files
-cp ../ip.txt .
-touch subdomain_ip.txt domains.txt subdomains.txt excluded_hosts.txt
+# --- Utility Functions ---
 
-# === Exclusion Configuration ===
-echo "[+] Do you want to exclude any critical hosts from aggressive scanning? (y/n)"
-read exclude_response
-if [[ "$exclude_response" == "y" ]]; then
-    echo "[+] Enter hosts to exclude (one per line, empty line to finish):"
-    while true; do
-        read exclude_host
-        [[ -z "$exclude_host" ]] && break
-        echo "$exclude_host" >> excluded_hosts.txt
-    done
-fi
+# Function to log messages with a timestamp
+log() {
+    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $1"
+}
 
-# === Resource Monitoring Function ===
+# Resource Monitoring Function
 monitor_resources() {
-    echo "[+] Current system load: $(uptime | awk '{print $10 $11 $12}')"
-    echo "[+] Memory usage: $(free -h | grep Mem | awk '{print $3 "/" $2}')"
+    log "[+] Current system load: $(uptime | awk -F'load average: ' '{print $2}')"
+    log "[+] Memory usage: $(free -h | awk '/^Mem:/ {print $3 "/" $2}')"
 }
 
-# === Checkpoint Management ===
+# Checkpoint Management
 create_checkpoint() {
-    echo "CHECKPOINT: $1" >> checkpoints.txt
-    echo "[+] Checkpoint created: $1"
+    echo "$1" >> checkpoints.log
+    log "[+] Checkpoint created: $1"
 }
 
-resume_from_checkpoint() {
-    if [[ -f checkpoints.txt ]]; then
-        last_checkpoint=$(tail -n 1 checkpoints.txt | cut -d':' -f2- | xargs)
-        echo "[+] Found checkpoint: $last_checkpoint"
-        echo "[+] Resume from this checkpoint? (y/n)"
-        read resume_response
-        if [[ "$resume_response" == "y" ]]; then
-            return 0
+# Dependency Check
+check_dependencies() {
+    log "[+] Checking for required tools..."
+    local missing_tools=0
+    # Add all CLI tools used in the script to this list
+    local tools=("nmap" "host" "subfinder" "amass" "jq" "dig" "whatweb" "nikto" "gobuster" "cutycapt" "wafw00f" "theHarvester" "wappalyzer" "sslscan" "whois" "tee" "tar")
+    for tool in "${tools[@]}"; do
+        if ! command -v "$tool" &> /dev/null; then
+            log "[-] Error: Required tool '$tool' is not installed."
+            missing_tools=1
         fi
+    done
+    if [[ $missing_tools -eq 1 ]]; then
+        log "[-] Please install the missing tools and try again."
+        exit 1
     fi
-    return 1
+    log "[✓] All dependencies are satisfied."
 }
 
-# === Step 1: Reverse IP Lookup with delay ===
-reverse_ip_lookup() {
-    echo "[+] Performing Reverse IP Lookup..."
-    create_checkpoint "reverse_ip_lookup"
+# --- Core Logic Functions ---
+
+# Step 1: Setup and Initialization
+setup() {
+    log "[+] Initializing scan in directory: $OUTPUT_DIR"
+    mkdir -p "$OUTPUT_DIR"
+    cd "$OUTPUT_DIR" || { log "[-] Failed to create/access directory"; exit 1; }
+
+    # Initialize log file
+    LOG_FILE="recon_log_$(date +%Y%m%d_%H%M%S).log"
+    # Redirect stdout/stderr to a log file and the console
+    exec > >(tee -a "$LOG_FILE") 2>&1
+
+    log "[+] Starting External Recon and Scanning at $(date)"
+    log "[+] This script includes delays to minimize impact on production systems"
     
+    # Copy and initialize files
+    cp "$INPUT_FILE" ./ip.txt
+    touch domains.txt subdomains.txt excluded_hosts.txt
+    
+    if [[ -n "$EXCLUDE_FILE" ]]; then
+        log "[+] Using exclusion list from: $EXCLUDE_FILE"
+        cp "$EXCLUDE_FILE" ./excluded_hosts.txt
+    fi
+
+    start_time=$(date +%s)
+    echo "$start_time" > .start_time
+}
+
+# Step 2: Reverse IP Lookup
+reverse_ip_lookup() {
+    create_checkpoint "rev_ip"
+    log "[+] Performing Reverse IP Lookup..."
     while read -r ip; do
-        echo "[*] Processing IP: $ip"
-        if grep -q "$ip" excluded_hosts.txt 2>/dev/null; then
-            echo "[!] Skipping excluded IP: $ip"
+        log "[*] Processing IP: $ip"
+        if grep -qFx "$ip" excluded_hosts.txt 2>/dev/null; then
+            log "[!] Skipping excluded IP: $ip"
             continue
         fi
-        
-        host "$ip" | grep "domain name pointer" | awk '{print $5}' >> Reverse_IP_lookup.txt
-        sleep $DEFAULT_SCAN_DELAY
+        host "$ip" | awk '/domain name pointer/ {print $5}' | sed 's/\.$//' >> Reverse_IP_lookup.txt
+        sleep "$DEFAULT_SCAN_DELAY"
     done < ip.txt
 
     sort -u Reverse_IP_lookup.txt -o Reverse_IP_lookup.txt
     cp Reverse_IP_lookup.txt domains.txt
-    echo "[✓] Reverse IP Lookup completed: $(wc -l < domains.txt) domains found"
+    log "[✓] Reverse IP Lookup completed: $(wc -l < domains.txt) domains found"
 }
 
-# === Step 2: Subdomain Enumeration with advanced tools ===
+# Step 3: Subdomain Enumeration
 subdomain_enumeration() {
-    echo "[+] Finding Subdomains..."
-    create_checkpoint "subdomain_enumeration"
-    
+    create_checkpoint "subdomains"
+    log "[+] Finding Subdomains..."
     mkdir -p subdomain_results
-    
     while read -r domain; do
-        echo "[*] Enumerating subdomains for: $domain"
-        
-        # Run multiple tools with delay between domains
-        echo "[*] Running Subfinder..."
-        subfinder -d "$domain" -silent >> subdomain_results/subfinder_"$domain".txt
-        
-        echo "[*] Running Amass passive scan (limited for production)..."
-        amass enum -passive -d "$domain" -timeout $TIMEOUT >> subdomain_results/amass_"$domain".txt
-        
-        echo "[*] Checking Certificate Transparency logs..."
-        curl -s "https://crt.sh/?q=%25.$domain&output=json" | jq -r '.[].name_value' | sort -u >> subdomain_results/crtsh_"$domain".txt
-        
-        # Combine and deduplicate results
-        cat subdomain_results/*_"$domain".txt | sort -u >> Subdomains.txt
-        
-        # Monitor resource usage
+        log "[*] Enumerating subdomains for: $domain"
+        subfinder -d "$domain" -silent -o "subdomain_results/subfinder_$domain.txt"
+        amass enum -passive -d "$domain" -timeout "$TIMEOUT" -o "subdomain_results/amass_$domain.txt"
+        curl -s "https://crt.sh/?q=%25.$domain&output=json" | jq -r '.[].name_value' | sort -u >> "subdomain_results/crtsh_$domain.txt"
         monitor_resources
-        
-        # Delay between domains
-        sleep $(($DEFAULT_SCAN_DELAY * 2))
+        sleep $((DEFAULT_SCAN_DELAY * 2))
     done < domains.txt
 
-    sort -u Subdomains.txt -o Subdomains.txt
-    echo "[✓] Subdomain enumeration completed: $(wc -l < Subdomains.txt) subdomains found"
-    
-    # Filter out wildcard domains
-    echo "[+] Filtering out potential wildcard domains..."
-    grep -v "^\*\." Subdomains.txt > Subdomains_filtered.txt
-    mv Subdomains_filtered.txt Subdomains.txt
+    cat subdomain_results/*.txt | sort -u > Subdomains_tmp.txt
+    log "[+] Filtering out potential wildcard domains..."
+    grep -v "^\*\." Subdomains_tmp.txt > Subdomains.txt
+    rm Subdomains_tmp.txt
+    log "[✓] Subdomain enumeration completed: $(wc -l < Subdomains.txt) subdomains found"
 }
 
-# === Step 3: Subdomain IP Resolution with parallel processing ===
+# Step 4: Subdomain IP Resolution
 resolve_subdomain_ips() {
-    echo "[+] Resolving Subdomain IPs (with parallel processing)..."
-    create_checkpoint "resolve_subdomain_ips"
+    create_checkpoint "resolve"
+    log "[+] Resolving Subdomain IPs (parallel processing)..."
+    log "[*] Resolving $(wc -l < Subdomains.txt) subdomains..."
     
-    total_subdomains=$(wc -l < Subdomains.txt)
-    echo "[*] Resolving $total_subdomains subdomains..."
-    
-    > Subdomain_IPs.txt
-    > subdomain_ip_mapping.txt
-    
-    # Split subdomains file for parallel processing
-    split -l 100 Subdomains.txt subdomains_chunk_
-    
-    for chunk in subdomains_chunk_*; do
+    pids=()
+    while read -r sub; do
         (
-            while read -r sub; do
-                ip=$(dig +short "$sub" | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n 1)
-                if [[ ! -z "$ip" ]]; then
-                    echo "$ip" >> Subdomain_IPs.txt.tmp
-                    echo "$sub,$ip" >> subdomain_ip_mapping.txt.tmp
-                fi
-                sleep 0.5  # Small delay between DNS queries
-            done < "$chunk"
+            ip=$(dig +short A "$sub" | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | head -n 1)
+            if [[ -n "$ip" ]]; then
+                echo "$ip"
+                echo "$sub,$ip" >> subdomain_ip_mapping.tmp
+            fi
         ) &
-        
-        # Limit number of parallel processes
-        while [[ $(jobs -r | wc -l) -ge $MAX_PARALLEL_SCANS ]]; do
-            sleep 1
-        done
-    done
-    
-    # Wait for all resolution jobs to complete
+        pids+=($!)
+        if (( ${#pids[@]} >= MAX_PARALLEL_SCANS )); then
+            wait -n
+        fi
+    done < Subdomains.txt
     wait
     
-    # Combine temporary files
-    cat Subdomain_IPs.txt.tmp 2>/dev/null >> Subdomain_IPs.txt
-    cat subdomain_ip_mapping.txt.tmp 2>/dev/null >> subdomain_ip_mapping.txt
-    rm -f Subdomain_IPs.txt.tmp subdomain_ip_mapping.txt.tmp subdomains_chunk_*
-    
-    sort -u Subdomain_IPs.txt -o Subdomain_IPs.txt
-    sort -u subdomain_ip_mapping.txt -o subdomain_ip_mapping.txt
-    
-    echo "[✓] Subdomain IP resolution completed: $(wc -l < Subdomain_IPs.txt) IPs found"
+    sort -u subdomain_ip_mapping.tmp -o subdomain_ip_mapping.txt
+    cut -d, -f2 subdomain_ip_mapping.txt | sort -u > Subdomain_IPs.txt
+    rm subdomain_ip_mapping.tmp
+    log "[✓] Subdomain IP resolution completed: $(wc -l < Subdomain_IPs.txt) IPs found"
 }
 
-# === Step 4: Port Scanning with decreased intensity ===
+# Step 5: Port Scanning
 port_scanning() {
-    echo "[+] Running Nmap Port Scans (with reduced intensity for production)..."
-    create_checkpoint "port_scanning"
+    create_checkpoint "portscan"
+    log "[+] Running Nmap Port Scans (reduced intensity)..."
+    log "[*] Running top 1000 ports scan first..."
+    nmap -sS -Pn --top-ports 1000 -T"$NMAP_TIMING" --max-retries 2 -iL ip.txt -oA nmap/main_ip_top_ports
+    nmap -sS -Pn --top-ports 1000 -T"$NMAP_TIMING" --max-retries 2 -iL Subdomain_IPs.txt -oA nmap/subdomain_top_ports
     
-    # More careful approach for production
-    echo "[*] Running top ports scan first..."
-    nmap -sS -Pn --top-ports 1000 -T$NMAP_TIMING --max-retries 2 --host-timeout 30m -iL ip.txt -oA main_ip_top_ports
-    nmap -sS -Pn --top-ports 1000 -T$NMAP_TIMING --max-retries 2 --host-timeout 30m -iL Subdomain_IPs.txt -oA subdomain_top_ports
+    grep "open" nmap/*.gnmap | cut -d' ' -f2 | sort -u > hosts_with_open_ports.txt
     
-    # Extract open ports for targeted full scan
-    grep "open" main_ip_top_ports.gnmap | cut -d' ' -f2 > hosts_with_open_ports.txt
-    grep "open" subdomain_top_ports.gnmap | cut -d' ' -f2 > subdomain_hosts_with_open_ports.txt
-    
-    echo "[*] Running full scan only on hosts with open ports..."
+    log "[*] Running full port scan ONLY on hosts with open ports..."
     if [[ -s hosts_with_open_ports.txt ]]; then
-        nmap -sS -Pn -p- -T$NMAP_TIMING --max-retries 2 --host-timeout 60m -iL hosts_with_open_ports.txt -oA main_ip_fullscan
+        nmap -sS -Pn -p- -T"$NMAP_TIMING" --max-retries 2 -iL hosts_with_open_ports.txt -oA nmap/all_hosts_fullscan
     fi
-    
-    if [[ -s subdomain_hosts_with_open_ports.txt ]]; then
-        nmap -sS -Pn -p- -T$NMAP_TIMING --max-retries 2 --host-timeout 60m -iL subdomain_hosts_with_open_ports.txt -oA subdomain_fullscan
-    fi
-    
-    echo "[✓] Port scanning completed"
+    log "[✓] Port scanning completed"
 }
 
-# === Step 5: Service Detection with selective version scanning ===
+# Step 6: Service & Version Detection
 service_detection() {
-    echo "[+] Performing Service & OS Detection (carefully)..."
-    create_checkpoint "service_detection"
-    
-    # Extract open ports for more efficient service scanning
-    if [[ -f main_ip_fullscan.gnmap ]]; then
-        open_ports_main=$(grep -h "open" main_ip_fullscan.gnmap | cut -d' ' -f4- | tr ',' '\n' | grep "open" | cut -d'/' -f1 | sort -u | tr '\n' ',')
-        if [[ ! -z "$open_ports_main" ]]; then
-            echo "[*] Scanning only open ports on main IPs..."
-            nmap -sV -O --version-intensity 4 -p"${open_ports_main%,}" -T$NMAP_TIMING -iL hosts_with_open_ports.txt -oA main_ip_service_os
+    create_checkpoint "servicedetect"
+    log "[+] Performing Service & Version Detection..."
+    if [[ -f nmap/all_hosts_fullscan.gnmap ]]; then
+        open_ports=$(grep -h "open" nmap/all_hosts_fullscan.gnmap | cut -d' ' -f4- | tr -d ' ' | sed 's|/open/[a-zA-Z-]*||g' | tr ',' '\n' | sort -un | tr '\n' ',' | sed 's/,$//')
+        if [[ -n "$open_ports" ]]; then
+            log "[*] Scanning only identified open ports for services..."
+            nmap -sV -O --version-intensity 4 -p"$open_ports" -T"$NMAP_TIMING" -iL hosts_with_open_ports.txt -oA nmap/services_os_scan
         fi
     fi
-    
-    if [[ -f subdomain_fullscan.gnmap ]]; then
-        open_ports_sub=$(grep -h "open" subdomain_fullscan.gnmap | cut -d' ' -f4- | tr ',' '\n' | grep "open" | cut -d'/' -f1 | sort -u | tr '\n' ',')
-        if [[ ! -z "$open_ports_sub" ]]; then
-            echo "[*] Scanning only open ports on subdomain IPs..."
-            nmap -sV -O --version-intensity 4 -p"${open_ports_sub%,}" -T$NMAP_TIMING -iL subdomain_hosts_with_open_ports.txt -oA subdomain_service_os
-        fi
-    fi
-    
-    echo "[✓] Service detection completed"
+    log "[✓] Service detection completed"
 }
 
-# === Step 6: Enhanced Web Stack Detection ===
+# Step 7: Web Technology Detection (WhatWeb)
 web_stack_detection() {
-    echo "[+] Running Web Technology Detection..."
-    create_checkpoint "web_stack_detection"
-    
-    mkdir -p web_detection
-    
-    # Extract web servers from Nmap results
-    echo "[*] Identifying web servers from Nmap results..."
-    grep -h "open" *_service_os.gnmap | grep -E "http|web|ssl" > potential_web_servers.txt
-    
-    # Combine with all subdomains for thorough checks
-    echo "[*] Checking all subdomains for web services..."
-    
+    create_checkpoint "webtech"
+    log "[+] Running Web Technology Detection..."
+    grep -h "open" nmap/*.gnmap | grep -E "http|web|ssl" | cut -d' ' -f2 | sort -u > potential_web_hosts.txt
     > web_servers.txt
-    while read -r sub; do
-        echo "http://$sub" >> web_servers.txt
-        echo "https://$sub" >> web_servers.txt
-    done < Subdomains.txt
-    
-    # Run WhatWeb with rate limiting
-    echo "[*] Running WhatWeb on $(wc -l < web_servers.txt) potential web servers..."
-    whatweb --no-errors --max-threads 5 --wait 5 -i web_servers.txt -v -a 3 --log-json=web_detection/whatweb_results.json
-    
-    # Generate readable report
-    cat web_detection/whatweb_results.json | jq -r '.[] | "[" + .target + "] " + (.plugins | to_entries | map(.key + ": " + (.value | tostring)) | join(", "))' > web_detection/whatweb_summary.txt
-    
-    echo "[✓] Web technology detection completed"
+    while read -r host; do
+        echo "http://$host" >> web_servers.txt
+        echo "https://$host" >> web_servers.txt
+    done < potential_web_hosts.txt
+
+    log "[*] Running WhatWeb on $(wc -l < web_servers.txt) potential URLs..."
+    whatweb --no-errors --max-threads 5 --wait 5 -i web_servers.txt -a 3 --log-json=web_detection/whatweb_results.json
+    jq -r '.[] | .target' web_detection/whatweb_results.json > confirmed_web_servers.txt
+    log "[✓] Web technology detection completed"
 }
 
-# === Step 7: Safe Web Vulnerability Scanning ===
+# Step 8: Safe Web Vulnerability Scanning (Nikto)
 web_vulnerability_scan() {
-    echo "[+] Running Lightweight Web Vulnerability Scan..."
-    create_checkpoint "web_vulnerability_scan"
-    
-    mkdir -p vulnerability_scan
-    
-    # Extract confirmed web servers from WhatWeb results
-    jq -r '.[] | .target' web_detection/whatweb_results.json > confirmed_web_servers.txt
-    
-    echo "[*] Performing light Nikto scan on $(wc -l < confirmed_web_servers.txt) web servers..."
-    cat confirmed_web_servers.txt | while read -r target; do
-        echo "[*] Scanning $target (with timeout and tuning for production)..."
-        # Use a more targeted scan with specific security checks
-        timeout $TIMEOUT nikto -h "$target" -Tuning 4 -maxtime 15m -o vulnerability_scan/nikto_$(echo "$target" | sed 's/[:/]/_/g').txt
-        
-        # Respect the server by waiting between scans
+    create_checkpoint "webvuln"
+    log "[+] Running Lightweight Web Vulnerability Scan..."
+    if [[ ! -s confirmed_web_servers.txt ]]; then
+        log "[!] No confirmed web servers found. Skipping Nikto scan."
+        return
+    fi
+    log "[*] Performing light Nikto scan on $(wc -l < confirmed_web_servers.txt) web servers..."
+    while read -r target; do
+        log "[*] Scanning $target (with timeout and tuning)..."
+        sanitized_target=$(echo "$target" | tr -c '[:alnum:].' '_')
+        timeout "$TIMEOUT" nikto -h "$target" -Tuning 4 -maxtime 15m -o "vulnerability_scan/nikto_$sanitized_target.txt"
         sleep $((DEFAULT_SCAN_DELAY * 3))
         monitor_resources
-    done
-    
-    echo "[✓] Web vulnerability scanning completed"
+    done < confirmed_web_servers.txt
+    log "[✓] Web vulnerability scanning completed"
 }
 
-# === Step 8: Selective Vulnerability Detection ===
+# Step 9: Selective Vulnerability Detection (Nmap Scripts)
 vulnerability_detection() {
-    echo "[+] Running Targeted Vulnerability Scans..."
-    create_checkpoint "vulnerability_detection"
-    
-    mkdir -p vuln_scan
-    
-    # Run Nmap vulnerability scan only on specific services known to be vulnerable
-    echo "[*] Extracting service information for targeted vulnerability scanning..."
-    
-    # Find SSH servers for specific checks
-    grep -h "open" *_service_os.gnmap | grep "ssh" > ssh_servers.txt
-    if [[ -s ssh_servers.txt ]]; then
-        echo "[*] Checking SSH servers for vulnerabilities..."
-        nmap -sV --script "ssh* and not brute and not dos" -p 22 -iL ssh_servers.txt -oA vuln_scan/ssh_vulns
+    create_checkpoint "vulndetect"
+    log "[+] Running Targeted Vulnerability Scans with Nmap NSE..."
+    grep -h "open" nmap/*.gnmap | cut -d' ' -f2 | sort -u > nmap_targets.txt
+    if [[ ! -s nmap_targets.txt ]]; then
+        log "[!] No targets for Nmap scripting. Skipping."
+        return
     fi
-    
-    # Find web servers for specific checks
-    grep -h "open" *_service_os.gnmap | grep -E "http|https" > http_servers.txt
-    if [[ -s http_servers.txt ]]; then
-        echo "[*] Checking web servers for vulnerabilities..."
-        nmap -sV --script "http-vuln* and not dos and not brute" -p 80,443,8080,8443 -iL http_servers.txt -oA vuln_scan/http_vulns
-    fi
-    
-    # Find database servers
-    grep -h "open" *_service_os.gnmap | grep -E "mysql|mssql|oracle|postgresql" > db_servers.txt
-    if [[ -s db_servers.txt ]]; then
-        echo "[*] Checking database servers for security issues..."
-        nmap -sV --script "mysql* or mssql* or oracle* or postgresql* and not brute and not dos" -iL db_servers.txt -oA vuln_scan/db_vulns
-    fi
-    
-    echo "[✓] Vulnerability detection completed"
+    log "[*] Checking for common vulnerabilities (non-intrusive scripts)..."
+    nmap -sV --script "vuln" --script-args "unsafe=0" -T"$NMAP_TIMING" -iL nmap_targets.txt -oA vuln_scan/nmap_vuln_scan
+    log "[✓] Vulnerability detection completed"
 }
 
-# === Step 9: Additional Recon ===
-additional_recon() {
-    echo "[+] Performing Additional Reconnaissance..."
-    create_checkpoint "additional_recon"
-    
-    mkdir -p additional_info
-    
-    # DNS records for domains
-    echo "[*] Gathering DNS records for domains..."
-    while read -r domain; do
-        echo "[*] DNS records for $domain" >> additional_info/dns_records.txt
-        for record in A AAAA MX NS TXT SOA CNAME; do
-            dig +short $record $domain >> additional_info/dns_records.txt
-        done
-        echo "---------------------" >> additional_info/dns_records.txt
-        sleep $DEFAULT_SCAN_DELAY
-    done < domains.txt
-    
-    # WHOIS information
-    echo "[*] Gathering WHOIS information..."
-    while read -r domain; do
-        whois $domain > additional_info/whois_${domain}.txt
-        sleep $DEFAULT_SCAN_DELAY
-    done < domains.txt
-    
-    # SSL/TLS information for HTTPS sites
-    echo "[*] Checking SSL/TLS configurations..."
-    grep "https" confirmed_web_servers.txt | while read -r target; do
-        host=$(echo $target | sed 's|https://||')
-        echo "[*] Checking SSL for $host..."
-        timeout $TIMEOUT sslscan --no-failed $host > additional_info/ssl_${host}.txt
-        sleep $DEFAULT_SCAN_DELAY
-    done
-    # === Step 9: Directory Bruteforcing with rate limiting ===
-echo "[+] Performing Directory Bruteforcing on Web Servers..."
-mkdir -p dirb_reports
-while read -r sub; do
-    # Check if host is up and running HTTP/HTTPS before scanning
-    if curl -s --head --connect-timeout 3 "http://$sub" >/dev/null || curl -s --head --connect-timeout 3 "https://$sub" >/dev/null; then
-        echo "[*] Directory bruteforcing on $sub"
-        # Use gobuster with rate limiting for production safety
-        gobuster dir -u "http://$sub" -w /usr/share/wordlists/dirb/common.txt -q -t 5 -o "dirb_reports/gobuster_$sub.txt" --delay 500ms
-        sleep 5  # Delay between hosts to reduce load
+# Step 10: Directory Bruteforcing (gobuster)
+directory_bruteforcing() {
+    create_checkpoint "dirb"
+    log "[+] Performing Directory Bruteforcing..."
+    if [[ ! -s confirmed_web_servers.txt ]]; then
+        log "[!] No confirmed web servers. Skipping dirb."
+        return
     fi
-done < Subdomains.txt
-
-# === Step 10: Screenshot Web Pages ===
-echo "[+] Taking Screenshots of Web Pages..."
-mkdir -p screenshots
-while read -r sub; do
-    echo "[*] Capturing screenshot of $sub"
-    # Use cutycapt or aquatone for screenshots
-    timeout 30s cutycapt --url="http://$sub" --out="screenshots/$sub.png" 2>/dev/null
-    if [ ! -f "screenshots/$sub.png" ] || [ ! -s "screenshots/$sub.png" ]; then
-        timeout 30s cutycapt --url="https://$sub" --out="screenshots/$sub.png" 2>/dev/null
+    if [[ ! -f "$WORDLIST" ]]; then
+        log "[-] Wordlist not found at $WORDLIST. Skipping directory bruteforcing."
+        return
     fi
-    sleep 2  # Add delay between screenshots
-done < Subdomains.txt
+    while read -r target; do
+        sanitized_target=$(echo "$target" | tr -c '[:alnum:].' '_')
+        log "[*] Directory bruteforcing on $target"
+        gobuster dir -u "$target" -w "$WORDLIST" -q -t 10 -o "dirb_reports/gobuster_$sanitized_target.txt" --delay 500ms
+        sleep 5
+    done < confirmed_web_servers.txt
+    log "[✓] Directory bruteforcing completed."
+}
 
-# === Step 11: Check for Common Security Misconfigurations ===
-echo "[+] Checking for Common Security Misconfigurations..."
-mkdir -p security_checks
-
-# Check for exposed .git directories
-echo "[*] Checking for exposed .git directories..."
-while read -r sub; do
-    if curl -s --head --connect-timeout 3 "http://$sub/.git/HEAD" | grep -q "200 OK"; then
-        echo "$sub has exposed .git directory" >> security_checks/exposed_git.txt
-    elif curl -s --head --connect-timeout 3 "https://$sub/.git/HEAD" | grep -q "200 OK"; then
-        echo "$sub has exposed .git directory" >> security_checks/exposed_git.txt
+# Step 11: Screenshot Web Pages
+take_screenshots() {
+    create_checkpoint "screenshots"
+    log "[+] Taking Screenshots of Web Pages..."
+    if [[ ! -s confirmed_web_servers.txt ]]; then
+        log "[!] No confirmed web servers. Skipping screenshots."
+        return
     fi
-    sleep 1
-done < Subdomains.txt
+    while read -r target; do
+        sanitized_target=$(echo "$target" | tr -c '[:alnum:].' '_')
+        log "[*] Capturing screenshot of $target"
+        timeout 30s cutycapt --url="$target" --out="screenshots/$sanitized_target.png" 2>/dev/null
+        sleep 2
+    done < confirmed_web_servers.txt
+    log "[✓] Screenshots completed."
+}
 
-# Check for exposed environment files
-echo "[*] Checking for exposed environment files..."
-while read -r sub; do
-    for file in ".env" ".env.backup" ".env.dev" "wp-config.php" "config.php" "settings.php" "database.yml"; do
-        if curl -s --head --connect-timeout 3 "http://$sub/$file" | grep -q "200 OK"; then
-            echo "$sub has exposed $file" >> security_checks/exposed_config.txt
-        elif curl -s --head --connect-timeout 3 "https://$sub/$file" | grep -q "200 OK"; then
-            echo "$sub has exposed $file" >> security_checks/exposed_config.txt
+# Step 12: Check for Common Security Misconfigurations
+check_misconfigs() {
+    create_checkpoint "misconfigs"
+    log "[+] Checking for Common Security Misconfigurations..."
+    if [[ ! -s confirmed_web_servers.txt ]]; then
+        log "[!] No confirmed web servers. Skipping misconfig checks."
+        return
+    fi
+    log "[*] Checking for exposed .git directories and environment files..."
+    while read -r target; do
+        if curl -sIk --connect-timeout 5 "$target/.git/HEAD" | grep -q "200 OK"; then
+            echo "$target has exposed .git directory" >> security_checks/exposed_git.txt
         fi
-        sleep 0.5
-    done
-done < Subdomains.txt
+        for file in ".env" ".env.backup" "wp-config.php" "database.yml"; do
+            if curl -sIk --connect-timeout 5 "$target/$file" | grep -q "200 OK"; then
+                echo "$target has exposed $file" >> security_checks/exposed_config.txt
+            fi
+        done
+        sleep 1
+    done < confirmed_web_servers.txt
+    log "[✓] Misconfiguration checks completed."
+}
 
-# === Step 12: WAF Detection ===
-echo "[+] Detecting Web Application Firewalls..."
-mkdir -p waf_detection
-while read -r sub; do
-    echo "[*] Checking for WAF on $sub"
-    wafw00f "http://$sub" -o "waf_detection/waf_$sub.txt" 2>/dev/null
-    sleep 2
-done < Subdomains.txt
+# Step 13: WAF Detection
+detect_waf() {
+    create_checkpoint "waf"
+    log "[+] Detecting Web Application Firewalls..."
+    if [[ ! -s Subdomains.txt ]]; then log "[!] No subdomains to check for WAF."; return; fi
+    wafw00f -i Subdomains.txt -o waf_detection/waf_report.txt 2>/dev/null
+    log "[✓] WAF detection completed."
+}
 
-# === Step 13: DNS Zone Transfer Attempt ===
-echo "[+] Attempting DNS Zone Transfers..."
-mkdir -p dns_info
-while read -r domain; do
-    echo "[*] Checking zone transfer for $domain"
-    # Get name servers
-    ns_servers=$(dig +short NS $domain)
-    for ns in $ns_servers; do
-        dig @$ns $domain AXFR > "dns_info/zonetransfer_${domain}_${ns}.txt"
-    done
-    sleep 1
-done < domains.txt
+# Step 14: DNS Zone Transfer Attempt
+zone_transfer() {
+    create_checkpoint "zonetransfer"
+    log "[+] Attempting DNS Zone Transfers..."
+    while read -r domain; do
+        log "[*] Checking zone transfer for $domain"
+        for ns in $(dig +short NS "$domain"); do
+            dig @"$ns" "$domain" AXFR > "dns_info/zonetransfer_${domain}_${ns}.txt"
+        done
+        sleep 1
+    done < domains.txt
+    log "[✓] DNS Zone Transfer attempts completed."
+}
 
-# === Step 14: Email Harvesting ===
-echo "[+] Harvesting Email Addresses..."
-mkdir -p email_harvest
-while read -r domain; do
-    echo "[*] Searching for emails related to $domain"
-    theHarvester -d $domain -b google,bing,yahoo -f "email_harvest/$domain.html"
-    sleep 5  # Significant delay to avoid API rate limits
-done < domains.txt
+# Step 15: Email Harvesting
+harvest_emails() {
+    create_checkpoint "emails"
+    log "[+] Harvesting Email Addresses..."
+    while read -r domain; do
+        log "[*] Searching for emails related to $domain"
+        theHarvester -d "$domain" -b google,bing -f "email_harvest/$domain.html"
+        sleep 10
+    done < domains.txt
+    log "[✓] Email harvesting completed."
+}
 
-# === Step 15: Technologies Identification ===
-echo "[+] Identifying Technologies with Wappalyzer CLI..."
-mkdir -p tech_detection
-while read -r sub; do
-    if curl -s --head --connect-timeout 3 "http://$sub" >/dev/null; then
-        echo "[*] Detecting technologies on http://$sub"
-        wappalyzer "http://$sub" > "tech_detection/wappalyzer_http_$sub.json" 2>/dev/null
-    fi
-    if curl -s --head --connect-timeout 3 "https://$sub" >/dev/null; then
-        echo "[*] Detecting technologies on https://$sub"
-        wappalyzer "https://$sub" > "tech_detection/wappalyzer_https_$sub.json" 2>/dev/null
-    fi
-    sleep 3
-done < Subdomains.txt
+# Step 16: Technologies Identification (Wappalyzer)
+detect_technologies() {
+    create_checkpoint "techdetect"
+    log "[+] Identifying Technologies with Wappalyzer CLI..."
+    if [[ ! -s confirmed_web_servers.txt ]]; then log "[!] No web servers for tech detection."; return; fi
+    while read -r target; do
+        sanitized_target=$(echo "$target" | tr -c '[:alnum:].' '_')
+        log "[*] Detecting technologies on $target"
+        wappalyzer "$target" > "tech_detection/wappalyzer_$sanitized_target.json" 2>/dev/null
+        sleep 3
+    done < confirmed_web_servers.txt
+    log "[✓] Technology identification completed."
+}
 
-# === Step 16: Generate HTML Report ===
-echo "[+] Generating HTML Report..."
-report_date=$(date +"%Y-%m-%d")
-cat > report.html << EOF
+# Step 17: Generate HTML Report
+generate_report() {
+    create_checkpoint "report"
+    log "[+] Generating HTML Report..."
+    report_date=$(date +"%Y-%m-%d")
+    cat > report.html <<-EOF
 <!DOCTYPE html>
-<html>
-<head>
-    <title>Reconnaissance Report - $report_date</title>
-    <style>
-        body { font-family: Arial, sans-serif; margin: 20px; }
-        h1, h2, h3 { color: #2c3e50; }
-        .section { margin-bottom: 20px; }
-        table { border-collapse: collapse; width: 100%; }
-        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
-        th { background-color: #f2f2f2; }
-        .summary { background-color: #f8f9fa; padding: 15px; border-radius: 5px; }
-    </style>
-</head>
-<body>
-    <h1>External Reconnaissance Report</h1>
-    <div class="summary">
-        <h2>Summary</h2>
-        <p><strong>Date:</strong> $report_date</p>
-        <p><strong>Target IPs:</strong> $(wc -l < ip.txt)</p>
-        <p><strong>Domains Discovered:</strong> $(wc -l < domains.txt)</p>
-        <p><strong>Subdomains Discovered:</strong> $(wc -l < Subdomains.txt)</p>
-        <p><strong>Subdomain IPs:</strong> $(wc -l < Subdomain_IPs.txt)</p>
-    </div>
-    
-    <div class="section">
-        <h2>Domains</h2>
-        <table>
-            <tr><th>Domain</th></tr>
+<html><head><title>Recon Report - $report_date</title>
+<style>
+body { font-family: Arial, sans-serif; margin: 20px; background-color: #f4f4f9; color: #333; }
+h1, h2, h3 { color: #2c3e50; }
+pre { background-color: #eee; padding: 10px; border-radius: 5px; white-space: pre-wrap; word-wrap: break-word; }
+.section { margin-bottom: 20px; padding: 15px; background-color: #fff; border: 1px solid #ddd; border-radius: 5px; }
+.summary { background-color: #eaf2f8; }
+</style></head><body>
+<h1>External Reconnaissance Report</h1>
+<div class="section summary"><h2>Summary</h2>
+<p><strong>Date:</strong> $report_date</p>
+<p><strong>Domains:</strong> $(wc -l < domains.txt)</p>
+<p><strong>Subdomains:</strong> $(wc -l < Subdomains.txt)</p>
+<p><strong>Web Servers:</strong> $(wc -l < confirmed_web_servers.txt)</p>
+</div>
+<div class="section"><h2>Domains</h2><pre>$(cat domains.txt)</pre></div>
+<div class="section"><h2>Subdomains</h2><pre>$(head -50 Subdomains.txt)</pre></div>
+<div class="section"><h2>Open Ports & Services (Sample)</h2><pre>$(head -50 nmap/services_os_scan.nmap 2>/dev/null || echo "No service scan results.")</pre></div>
+<div class="section"><h2>Potential Security Issues</h2><pre>$(cat security_checks/exposed_git.txt 2>/dev/null || echo "None found.")
+$(cat security_checks/exposed_config.txt 2>/dev/null || echo "None found.")</pre></div>
+</body></html>
 EOF
+    log "[✓] HTML Report generated: report.html"
+}
 
-# Add domains to the report
-while read -r domain; do
-    echo "<tr><td>$domain</td></tr>" >> report.html
-done < domains.txt
+# Step 18: Create Results Archive
+create_archive() {
+    create_checkpoint "archive"
+    log "[+] Creating Results Archive..."
+    archive_name="../${OUTPUT_DIR##*/}_report_$(date +%Y%m%d).tar.gz"
+    tar -czf "$archive_name" ./* --exclude='*.log'
+    log "[✓] Archive created: $archive_name"
+}
 
-cat >> report.html << EOF
-        </table>
-    </div>
-    
-    <div class="section">
-        <h2>Top Subdomains</h2>
-        <table>
-            <tr><th>Subdomain</th></tr>
-EOF
+# Step 19: Final Cleanup
+final_cleanup() {
+    create_checkpoint "cleanup"
+    log "[+] Cleaning up temporary files..."
+    find . -name "*.tmp" -delete
+}
 
-# Add top 20 subdomains to the report
-head -20 Subdomains.txt | while read -r sub; do
-    echo "<tr><td>$sub</td></tr>" >> report.html
-done
 
-cat >> report.html << EOF
-        </table>
-    </div>
-    
-    <div class="section">
-        <h2>Open Ports Summary</h2>
-        <p>See detailed Nmap reports for complete information.</p>
-    </div>
-    
-    <div class="section">
-        <h2>Web Servers</h2>
-        <p>Screenshots of web pages are available in the screenshots directory.</p>
-    </div>
-    
-    <div class="section">
-        <h2>Potential Security Issues</h2>
-        <ul>
-EOF
+# --- Main Execution Logic ---
 
-# Add security issues if found
-if [ -f security_checks/exposed_git.txt ]; then
-    cat security_checks/exposed_git.txt | while read -r line; do
-        echo "<li>$line</li>" >> report.html
+main() {
+    # Argument parsing
+    SKIP_STEPS=""
+    RESUME=0
+
+    while [[ "$#" -gt 0 ]]; do
+        case $1 in
+            -i|--input-file) INPUT_FILE="$2"; shift ;;
+            -o|--output-dir) OUTPUT_DIR="$2"; shift ;;
+            -x|--exclude-file) EXCLUDE_FILE="$2"; shift ;;
+            -s|--skip-steps) SKIP_STEPS="$2"; shift ;;
+            --resume) RESUME=1 ;;
+            -t|--threads) MAX_PARALLEL_SCANS="$2"; shift ;;
+            --nmap-timing) NMAP_TIMING="$2"; shift ;;
+            --delay) DEFAULT_SCAN_DELAY="$2"; shift ;;
+            -w|--wordlist) WORDLIST="$2"; shift ;;
+            -h|--help) usage ;;
+            *) echo "Unknown parameter passed: $1"; usage ;;
+        esac
+        shift
     done
-fi
 
-if [ -f security_checks/exposed_config.txt ]; then
-    cat security_checks/exposed_config.txt | while read -r line; do
-        echo "<li>$line</li>" >> report.html
-    done
-fi
-
-cat >> report.html << EOF
-        </ul>
-    </div>
+    # Validate required arguments
+    if [[ -z "$INPUT_FILE" || -z "$OUTPUT_DIR" ]]; then
+        log "[-] Error: Input file and output directory are required."
+        usage
+    fi
+    if [[ ! -f "$INPUT_FILE" ]]; then
+        log "[-] Error: Input file not found: $INPUT_FILE"
+        exit 1
+    fi
     
-    <div class="section">
-        <h2>Next Steps</h2>
-        <ul>
-            <li>Review all open ports and consider implementing firewall rules</li>
-            <li>Investigate potential security issues flagged in this report</li>
-            <li>Consider more in-depth testing for critical applications</li>
-            <li>Review DNS configurations and domain exposure</li>
-        </ul>
-    </div>
-</body>
-</html>
-EOF
+    # Create an array of completed steps if resuming
+    COMPLETED_STEPS=()
+    if [[ "$RESUME" -eq 1 && -f "$OUTPUT_DIR/checkpoints.log" ]]; then
+        mapfile -t COMPLETED_STEPS < "$OUTPUT_DIR/checkpoints.log"
+        log "[+] Resuming scan. Found ${#COMPLETED_STEPS[@]} completed steps."
+    fi
 
-# === Step 17: Create Results Archive ===
-echo "[+] Creating Results Archive..."
-tar -czf "../${result_dir}_report_${report_date}.tar.gz" *
+    # Execute all steps unless skipped
+    for step in "${ALL_STEPS[@]}"; do
+        # Check if step should be skipped via command line
+        if [[ ",$SKIP_STEPS," == *",$step,"* ]]; then
+            # We don't log during 'setup' because the log file isn't configured yet.
+            if [[ "$step" != "setup" ]]; then
+                log "[!] Skipping step as per user request: $step"
+            fi
+            continue
+        fi
 
-# === Step 18: Final Cleanup ===
-echo "[+] Cleaning Temporary Files..."
-find . -name "*.tmp" -delete
+        # Check if step should be skipped due to resume
+        if [[ "$RESUME" -eq 1 ]]; then
+            for completed in "${COMPLETED_STEPS[@]}"; do
+                if [[ "$step" == "$completed" ]]; then
+                    log "[!] Skipping already completed step: $step"
+                    # Use 'continue 2' to break out of the inner loop and continue the outer one
+                    continue 2
+                fi
+            done
+        fi
+        
+        # Create directories for results if they don't exist
+        case "$step" in
+            rev_ip|subdomains|resolve) : ;; # No specific dir needed for these
+            *) mkdir -p "${step//detect/detection}" "${step//scan/scans}" "${step//_//}" &>/dev/null ;;
+        esac
 
-# === Completion ===
-echo "[✓] External Recon and Scanning Completed."
-echo "[📁] Results saved in directory: $result_dir"
-echo "[📊] HTML Report: $result_dir/report.html"
-echo "[📦] Archive: ${result_dir}_report_${report_date}.tar.gz"
+        # Call the corresponding function
+        case "$step" in
+            deps) check_dependencies ;;
+            setup) setup ;;
+            rev_ip) reverse_ip_lookup ;;
+            subdomains) subdomain_enumeration ;;
+            resolve) resolve_subdomain_ips ;;
+            portscan) port_scanning ;;
+            servicedetect) service_detection ;;
+            webtech) web_stack_detection ;;
+            webvuln) web_vulnerability_scan ;;
+            vulndetect) vulnerability_detection ;;
+            dirb) directory_bruteforcing ;;
+            screenshots) take_screenshots ;;
+            misconfigs) check_misconfigs ;;
+            waf) detect_waf ;;
+            zonetransfer) zone_transfer ;;
+            emails) harvest_emails ;;
+            techdetect) detect_technologies ;;
+            report) generate_report ;;
+            archive) create_archive ;;
+            cleanup) final_cleanup ;;
+        esac
+    done
 
-# Calculate and display total execution time
-end_time=$(date +%s)
-start_time=$(stat -c %Y "$result_dir" 2>/dev/null || echo $end_time)
-duration=$((end_time - start_time))
-hours=$((duration / 3600))
-minutes=$(((duration % 3600) / 60))
-seconds=$((duration % 60))
+    # --- Completion ---
+    log "[✓] External Recon and Scanning Completed."
+    start_time=$(cat .start_time 2>/dev/null || date +%s)
+    end_time=$(date +%s)
+    duration=$((end_time - start_time))
+    hours=$((duration / 3600)); minutes=$(((duration % 3600) / 60)); seconds=$((duration % 60))
+    log "[⏱️] Total execution time: ${hours}h ${minutes}m ${seconds}s"
+}
 
-echo "[⏱️] Total execution time: ${hours}h ${minutes}m ${seconds}s"
+# Run the main function
+main "$@"
