@@ -100,13 +100,11 @@ install_node_tools() {
     fi
     print_success "Node.js tools installed successfully."
 
-    # --- [NEW] Add npm global bin path to user's profile ---
     print_status "Ensuring Node.js global binaries are in the PATH..."
     local run_user=${SUDO_USER:-$(whoami)}
     
-    # Get the global install prefix for npm as the correct user
     local npm_prefix
-    npm_prefix=$(npm config get prefix) # Using sudo, this gets the global system path
+    npm_prefix=$(npm config get prefix)
     if [ -z "$npm_prefix" ]; then
         print_warning "Could not determine npm global prefix. Manual PATH configuration may be needed."
         return
@@ -126,6 +124,7 @@ install_node_tools() {
     done
 }
 
+# --- [IMPROVED] Verification Function ---
 verify_installation() {
     print_status "Verifying installations..."
     
@@ -136,10 +135,17 @@ verify_installation() {
     
     local missing_count=0
     local run_user=${SUDO_USER:-$(whoami)}
+    local user_home="/home/$run_user"
+
+    # This is the command that will be run in a temporary shell.
+    # It sources the profile files first, then tries to find the command.
+    local check_command="source $user_home/.profile &>/dev/null; \
+                         source $user_home/.bashrc &>/dev/null; \
+                         source $user_home/.zshrc &>/dev/null; \
+                         command -v"
 
     for tool in "${all_tools[@]}"; do
-        # We check as the user who ran sudo, sourcing their profile to catch the new PATHs
-        if ! su -l "$run_user" -c "source ~/.bashrc &>/dev/null; source ~/.zshrc &>/dev/null; command -v $tool" &>/dev/null; then
+        if ! su -l "$run_user" -c "$check_command $tool" &>/dev/null; then
             print_error "$tool not found in PATH."
             missing_count=$((missing_count + 1))
         fi
@@ -147,13 +153,14 @@ verify_installation() {
 
     if [ "$missing_count" -gt 0 ]; then
         print_error "$missing_count tools seem to be missing or not in the PATH."
-        print_warning "Try running 'source ~/.bashrc' (or ~/.zshrc) in a new terminal before retrying."
+        print_warning "Verification failed. Please open a NEW terminal, then run 'command -v wappalyzer' to check manually."
         return 1
     fi
 
     print_success "All required tools are installed and available in the PATH."
     return 0
 }
+
 
 # --- Main Execution ---
 
