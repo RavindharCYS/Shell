@@ -1,0 +1,35 @@
+# requirements.txt
+# A list of dependencies for the external_recon.sh script.
+# Use the install_reqs.sh script for automated installation on Kali Linux.
+
+# --- APT Packages (Can be installed with 'apt-get install') ---
+
+# Core Utilities
+dnsutils        # For 'dig' and 'host' commands (reverse IP lookup, DNS checks)
+jq              # For parsing JSON output from crt.sh
+nmap            # For port scanning and service detection
+whois           # For domain ownership lookups
+curl            # For making web requests (crt.sh, checking hosts)
+
+# Web Scanning & Enumeration
+whatweb         # For web technology detection
+nikto           # For web vulnerability scanning
+gobuster        # For directory and file bruteforcing
+wafw00f         # For Web Application Firewall (WAF) detection
+sslscan         # For checking SSL/TLS configurations
+cutycapt        # For taking screenshots of web pages
+
+# Information Gathering
+theharvester    # For email and domain information harvesting
+
+# Wordlists (Required by Gobuster)
+seclists        # Comprehensive wordlists, includes dirb/common.txt
+
+# --- Golang-based Tools (Requires Go to be installed) ---
+# The install script will handle installing Go first.
+subfinder       # For fast passive subdomain enumeration
+amass           # For in-depth subdomain enumeration
+
+# --- Node.js-based Tools (Requires Node.js/NPM to be installed) ---
+# The install script will handle installing Node.js first.
+wappalyzer-cli  # For identifying technologies on websites
