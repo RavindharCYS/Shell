@@ -1,103 +1,182 @@
 #!/bin/bash
 
 # =================================================================
-# Installation Script for 'external.sh' dependencies on Kali Linux
+# Installation Script for 'external-cli.sh' dependencies
+# Designed for Debian-based systems like Kali Linux or Ubuntu.
 # =================================================================
+
+# --- Color Codes ---
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+RED='\033[0;31m'
+NC='\033[0m' # No Color
+
+# --- Helper Functions ---
+print_status() {
+    echo -e "[*] $1"
+}
+
+print_success() {
+    echo -e "${GREEN}[✓] $1${NC}"
+}
+
+print_error() {
+    echo -e "${RED}[-] $1${NC}" >&2
+}
+
+print_warning() {
+    echo -e "${YELLOW}[!] $1${NC}"
+}
+
+# --- Installation Functions ---
+
+install_apt_packages() {
+    print_status "Installing core tools from APT repository..."
+    
+    # List of packages to install via apt
+    local apt_packages=(
+        dnsutils      # for dig, host
+        jq
+        nmap
+        whois
+        curl
+        whatweb
+        nikto
+        gobuster
+        wafw00f
+        sslscan
+        cutycapt
+        theharvester
+        seclists      # for wordlists
+        golang-go
+        nodejs
+        npm
+    )
+
+    apt-get update
+    apt-get install -y "${apt_packages[@]}"
+    
+    if [ $? -ne 0 ]; then
+        print_error "Failed to install one or more APT packages. Please check the errors above."
+        exit 1
+    fi
+    print_success "Core APT packages installed successfully."
+}
+
+install_go_tools() {
+    print_status "Installing Go-based tools (Subfinder, Amass)..."
+    
+    # This ensures tools are installed for the user who ran `sudo`, not for root.
+    local run_user=${SUDO_USER:-$(whoami)}
+    local go_path
+    go_path=$(su -l "$run_user" -c 'go env GOPATH')
+
+    if [ -z "$go_path" ]; then
+        print_error "Could not determine Go path. Please ensure Go is installed correctly."
+        exit 1
+    fi
+
+    print_status "Go path is: $go_path"
+    local go_bin_path="$go_path/bin"
+
+    # List of Go-based tools
+    local go_tools=(
+        "github.com/projectdiscovery/subfinder/v2/cmd/subfinder"
+        "github.com/owasp-amass/amass/v4/cmd/amass"
+    )
+
+    for tool in "${go_tools[@]}"; do
+        print_status "Installing $tool..."
+        su -l "$run_user" -c "go install -v $tool@latest"
+    done
+
+    # --- Ensure Go binaries are in the PATH ---
+    # This is a more robust way to add the path to the user's profile.
+    local bash_profile="/home/$run_user/.bashrc"
+    local zsh_profile="/home/$run_user/.zshrc"
+    local path_export_line="export PATH=\$PATH:$go_bin_path"
+
+    for profile in "$bash_profile" "$zsh_profile"; do
+        if [ -f "$profile" ] && ! grep -q "PATH.*$go_bin_path" "$profile"; then
+            print_status "Adding Go bin path to $profile"
+            echo -e "\n# Go binaries path\n$path_export_line" >> "$profile"
+        fi
+    done
+    
+    print_success "Go-based tools installed."
+}
+
+install_node_tools() {
+    print_status "Installing Node.js-based tools (Wappalyzer CLI)..."
+    
+    # List of global npm packages
+    local npm_packages=(
+        "wappalyzer-cli"
+    )
+
+    npm install -g "${npm_packages[@]}"
+    
+    if [ $? -ne 0 ]; then
+        print_error "Failed to install one or more Node.js packages via npm."
+        exit 1
+    fi
+    print_success "Node.js tools installed successfully."
+}
+
+verify_installation() {
+    print_status "Verifying installations..."
+    
+    local all_tools=(
+        # APT
+        "dig" "host" "jq" "nmap" "whois" "curl" "whatweb" "nikto" "gobuster" "wafw00f" "sslscan" "cutycapt" "theHarvester"
+        # Go (needs to be checked as the user)
+        "subfinder" "amass"
+        # Node
+        "wappalyzer"
+    )
+    
+    local missing_count=0
+    local run_user=${SUDO_USER:-$(whoami)}
+
+    for tool in "${all_tools[@]}"; do
+        if ! su -l "$run_user" -c "command -v $tool" &>/dev/null; then
+            print_error "$tool not found in PATH."
+            missing_count=$((missing_count + 1))
+        fi
+    done
+
+    if [ "$missing_count" -gt 0 ]; then
+        print_error "$missing_count tools seem to be missing or not in the PATH."
+        print_warning "Try running 'source ~/.bashrc' (or ~/.zshrc) in a new terminal."
+        return 1
+    fi
+
+    print_success "All required tools are installed and available in the PATH."
+    return 0
+}
+
+# --- Main Execution ---
 
 # Check for root privileges
 if [[ $EUID -ne 0 ]]; then
-   echo "[-] This script must be run as root. Please use 'sudo'." 
+   print_error "This script must be run as root. Please use 'sudo ./install_reqs.sh'." 
    exit 1
 fi
 
-echo "[+] Starting dependency installation..."
+echo "====================================================="
+echo " Starting Dependency Installation for external-cli.sh"
+echo "====================================================="
 
-# --- Update package lists ---
-echo "[*] Updating package lists..."
-apt-get update
+install_apt_packages
+install_go_tools
+install_node_tools
 
-# --- Install APT Packages ---
-echo "[*] Installing core tools from APT repository..."
-apt-get install -y \
-    dnsutils \
-    jq \
-    nmap \
-    whois \
-    curl \
-    whatweb \
-    nikto \
-    gobuster \
-    wafw00f \
-    sslscan \
-    cutycapt \
-    theharvester \
-    seclists \
-    golang-go \
-    nodejs \
-    npm
+echo
+verify_installation
+echo
 
-if [ $? -ne 0 ]; then
-    echo "[-] Failed to install one or more APT packages. Please check the errors above."
-    exit 1
-fi
-echo "[✓] Core APT packages installed successfully."
+print_warning "IMPORTANT: For all changes to take effect, please open a NEW terminal session or run:"
+print_warning "source ~/.bashrc  (or 'source ~/.zshrc' if you use Zsh)"
+echo
 
-# --- Install Go-based tools ---
-echo "[*] Installing Go-based tools (Subfinder, Amass)..."
-# Note: This installs the tools for the user running the sudo command.
-# If you run `sudo -i` first, they install for root. If you run `sudo ./script.sh`, 
-# they install for your standard user ($SUDO_USER).
-RUN_USER=${SUDO_USER:-$(whoami)}
-GO_PATH=$(su -l $RUN_USER -c 'go env GOPATH')
-if [ -z "$GO_PATH" ]; then
-    echo "[-] Could not determine Go path. Please ensure Go is installed correctly."
-    exit 1
-fi
-
-echo "[*] Go path is: $GO_PATH"
-export PATH=$PATH:$GO_PATH/bin
-
-su -l $RUN_USER -c 'go install -v github.com/projectdiscovery/subfinder/v2/cmd/subfinder@latest'
-su -l $RUN_USER -c 'go install -v github.com/owasp-amass/amass/v4/...@master'
-
-# --- Ensure Go binaries are in the PATH ---
-# Check if the Go bin path is already in the user's bashrc/zshrc
-BASH_PROFILE="/home/$RUN_USER/.bashrc"
-ZSH_PROFILE="/home/$RUN_USER/.zshrc"
-GO_BIN_PATH_LINE="export PATH=\$PATH:\$HOME/go/bin"
-
-if [ -f "$BASH_PROFILE" ] && ! grep -q "$GO_BIN_PATH_LINE" "$BASH_PROFILE"; then
-    echo "[*] Adding Go bin path to $BASH_PROFILE"
-    echo -e "\n# Go binaries path\n$GO_BIN_PATH_LINE" >> "$BASH_PROFILE"
-fi
-if [ -f "$ZSH_PROFILE" ] && ! grep -q "$GO_BIN_PATH_LINE" "$ZSH_PROFILE"; then
-    echo "[*] Adding Go bin path to $ZSH_PROFILE"
-    echo -e "\n# Go binaries path\n$GO_BIN_PATH_LINE" >> "$ZSH_PROFILE"
-fi
-
-echo "[✓] Go-based tools installed. You may need to source your .bashrc/.zshrc or restart your terminal for the PATH to update."
-
-# --- Install Node.js-based tools ---
-echo "[*] Installing Node.js-based tools (Wappalyzer CLI)..."
-npm install -g wappalyzer-cli
-
-if [ $? -ne 0 ]; then
-    echo "[-] Failed to install Wappalyzer CLI via npm."
-    exit 1
-fi
-echo "[✓] Node.js tools installed successfully."
-
-
-# --- Final Verification ---
-echo "[+] Verifying installations..."
-source "$BASH_PROFILE" 2>/dev/null || source "$ZSH_PROFILE" 2>/dev/null
-
-command -v subfinder >/dev/null 2>&1 || { echo >&2 "[-] Subfinder not found in PATH."; }
-command -v amass >/dev/null 2>&1 || { echo >&2 "[-] Amass not found in PATH."; }
-command -v nmap >/dev/null 2>&1 || { echo >&2 "[-] Nmap not found."; }
-command -v wappalyzer >/dev/null 2>&1 || { echo >&2 "[-] Wappalyzer not found."; }
-command -v gobuster >/dev/null 2>&1 || { echo >&2 "[-] Gobuster not found."; }
-
-echo ""
-echo "[🎉] All dependencies have been installed successfully!"
-echo "[!] IMPORTANT: Please open a new terminal or run 'source ~/.bashrc' (or ~/.zshrc) for all changes to take effect."
+print_success "Installation script finished!"
